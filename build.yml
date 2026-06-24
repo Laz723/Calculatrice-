@@ -1,0 +1,121 @@
+# ============================================================
+#  Fabrique automatiquement les 3 setups (Windows / macOS / Linux)
+#  et les publie dans une "Release" de ton repo GitHub.
+#
+#  ➜ À placer dans :  .github/workflows/build.yml
+#  ➜ Gratuit tant que ton repo est PUBLIC.
+#
+#  POUR RÉUTILISER SUR UN AUTRE PROJET : change juste les 2 lignes
+#  APP_NAME et ENTRY ci-dessous. Rien d'autre à toucher.
+# ============================================================
+
+name: Build setups (Windows / macOS / Linux)
+
+# --- Quand est-ce que ça se déclenche ? ---
+on:
+  push:
+    tags: ['v*']            # quand tu pushes un tag de version (ex: v1.0.0)
+  workflow_dispatch:        # OU manuellement, via le bouton "Run workflow"
+    inputs:
+      version:
+        description: "Numéro de version (ex: v1.0.0)"
+        required: true
+        default: "v1.0.0"
+
+permissions:
+  contents: write           # nécessaire pour créer la Release
+
+# --- Les 2 SEULES lignes à adapter par projet ---
+env:
+  APP_NAME: Calculatrice          # le nom de ton appli
+  ENTRY: python/calculatrice.py   # le fichier Python à lancer (depuis la racine du repo)
+
+jobs:
+  # ============================================================
+  # ÉTAPE 1 : on compile l'appli sur les 3 systèmes EN MÊME TEMPS
+  # ============================================================
+  build:
+    strategy:
+      fail-fast: false      # si un OS plante, les autres continuent
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash         # même langage de commande sur les 3 OS
+
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: (Linux) installer Tkinter
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk
+
+      - name: Installer les dépendances
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          if [ -f python/requirements.txt ]; then pip install -r python/requirements.txt; fi
+
+      - name: Compiler avec PyInstaller
+        run: pyinstaller --onefile --windowed --paths "$(dirname "$ENTRY")" --name "$APP_NAME" "$ENTRY"
+
+      - name: (Windows) préparer le .exe
+        if: runner.os == 'Windows'
+        run: mv "dist/$APP_NAME.exe" "dist/$APP_NAME-Windows.exe"
+
+      - name: (Linux) préparer le .tar.gz
+        if: runner.os == 'Linux'
+        run: tar -czf "dist/$APP_NAME-Linux.tar.gz" -C dist "$APP_NAME"
+
+      - name: (macOS) préparer le .dmg
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dmg && cp -R "dist/$APP_NAME.app" dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname "$APP_NAME" -srcfolder dmg -ov -format UDZO "dist/$APP_NAME-macOS.dmg"
+
+      - name: Mettre de côté le fichier compilé
+        uses: actions/upload-artifact@v4
+        with:
+          name: setup-${{ runner.os }}
+          path: |
+            dist/*-Windows.exe
+            dist/*-Linux.tar.gz
+            dist/*-macOS.dmg
+          if-no-files-found: ignore
+
+  # ============================================================
+  # ÉTAPE 2 : on récupère les 3 fichiers et on crée UNE Release
+  # ============================================================
+  release:
+    needs: build            # attend que les 3 compilations soient finies
+    runs-on: ubuntu-latest
+    steps:
+      - name: Déterminer le numéro de version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Récupérer les 3 fichiers
+        uses: actions/download-artifact@v4
+        with:
+          path: setups
+          merge-multiple: true
+
+      - name: Publier la Release avec les 3 setups
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ env.APP_NAME }} ${{ steps.ver.outputs.tag }}
+          files: setups/*
